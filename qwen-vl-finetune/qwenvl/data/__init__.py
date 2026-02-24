@@ -1,8 +1,8 @@
 import re
 
 # Define placeholders for dataset paths
-ann_dir = "/mnt/ssd1/sh/projects/LGSC/LLaVAOV/instructions_lgsc_groma_style"
-data_dir = "/mnt/ssd1/datasets"
+ann_dir = "/mnt/ssd1/sh/projects/TIP/LGSC/Qwen3-VL/instructions_qwen/"
+data_dir = "/mnt/ssd1/datasets/"
 
 COCO_MULTI = {
     "annotation_path": ann_dir + "coco/coco_train_instructions_multi_categories.json",
