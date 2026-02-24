@@ -9,6 +9,7 @@ class ModelArguments:
     tune_mm_llm: bool = field(default=False)
     tune_mm_mlp: bool = field(default=False)
     tune_mm_vision: bool = field(default=False)
+    max_region_num: int = field(default=100)
 
 @dataclass
 class DataArguments:
