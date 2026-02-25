@@ -19,8 +19,9 @@ from transformers.utils.import_utils import define_import_structure
 
 if TYPE_CHECKING:
     from .configuration_qwen3_vl import *
-    from .modeling_qwen3_vl import *
-    from .modeling_qwen3_vl_select import *
+    # from .modeling_qwen3_vl import *
+    # from .modeling_qwen3_vl_select import *
+    from .modeling_qwen3_vl_roi import *
     from .processing_qwen3_vl import *
     # from .video_processing_qwen3_vl import *
 else:

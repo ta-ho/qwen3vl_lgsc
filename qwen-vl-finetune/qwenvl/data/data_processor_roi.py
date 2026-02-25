@@ -538,9 +538,9 @@ class DataCollatorForSupervisedDataset(object):
     tokenizer: transformers.PreTrainedTokenizer
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
-        input_ids, labels, position_ids = tuple(
+        input_ids, labels, position_ids, rois = tuple(
             [instance[key] for instance in instances]
-            for key in ("input_ids", "labels", "position_ids")
+            for key in ("input_ids", "labels", "position_ids", "rois")
         )
         input_ids = [ids.squeeze(0) for ids in input_ids]
         labels = [ids.squeeze(0) for ids in labels]
@@ -558,6 +558,7 @@ class DataCollatorForSupervisedDataset(object):
             input_ids=input_ids,
             labels=labels,
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
+            rois=rois,
         )
         images = list(
             instance["pixel_values"]

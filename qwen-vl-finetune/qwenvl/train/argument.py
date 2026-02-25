@@ -9,6 +9,7 @@ class ModelArguments:
     tune_mm_llm: bool = field(default=False)
     tune_mm_mlp: bool = field(default=False)
     tune_mm_vision: bool = field(default=False)
+    tune_roi: bool = field(default=False)
     max_region_num: int = field(default=100)
 
 @dataclass
@@ -38,6 +39,7 @@ class TrainingArguments(transformers.TrainingArguments):
     )
     mm_projector_lr: Optional[float] = None
     vision_tower_lr: Optional[float] = None
+    roi_lr: Optional[float] = None
 
     ## Lora config
     lora_enable: bool = field(default=False)

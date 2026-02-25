@@ -28,7 +28,7 @@ sys.path.append(str(project_root))
 from trainer import replace_qwen2_vl_attention_class
 
 from qwenvl.model import (
-    Qwen3VLForConditionalGeneration, 
+    Qwen3VLROIForConditionalGeneration, 
     Qwen3VLProcessor
 )
 
@@ -88,6 +88,20 @@ def set_model(model_args, model):
             p.requires_grad = False
         model.lm_head.requires_grad = False
 
+    if model_args.tune_roi:
+        for n, p in model.named_parameters():
+            if "roi_proj" in n:
+                p.requires_grad = True
+    else:
+        for n, p in model.named_parameters():
+            if "roi_proj" in n:
+                p.requires_grad = False
+
+    # Force unfreeze embed_tokens and lm_head regardless of tune_mm_llm
+    for n, p in model.named_parameters():
+        if "embed_tokens" in n or "lm_head" in n:
+            p.requires_grad = True
+
 
 def train(attn_implementation="flash_attention_2"):
     global local_rank
@@ -100,7 +114,7 @@ def train(attn_implementation="flash_attention_2"):
     local_rank = training_args.local_rank
     os.makedirs(training_args.output_dir, exist_ok=True)
 
-    model = Qwen3VLForConditionalGeneration.from_pretrained(
+    model = Qwen3VLROIForConditionalGeneration.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=training_args.cache_dir,
         attn_implementation=attn_implementation,
@@ -137,6 +151,7 @@ def train(attn_implementation="flash_attention_2"):
         use_fast=False,
     )
     tokenizer.add_tokens([ROI_FEAT_TOKEN] + list(DEFAULT_TOKENS.values()) + REGION_IDX_TOKENS, special_tokens=True)
+    model.config.roi_feat_token_id = tokenizer.convert_tokens_to_ids(ROI_FEAT_TOKEN)
 
     if training_args.lora_enable:
         from peft import LoraConfig, get_peft_model, TaskType
@@ -158,13 +173,19 @@ def train(attn_implementation="flash_attention_2"):
         set_model(model_args, model)
 
         if torch.distributed.get_rank() == 0:
-            trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            total = sum(p.numel() for p in model.parameters())
-            print(f"trainable parameters: {trainable:,d}")
-            print(f"total parameters: {total:,d}")
-            print(f"trainable parameters: {trainable / total * 100:.2f}%")
-            # model.visual.print_trainable_parameters()
-            # model.model.print_trainable_parameters()
+            model.visual.print_trainable_parameters()
+            model.model.print_trainable_parameters()
+
+            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            all_params = sum(p.numel() for p in model.parameters())
+            
+            print(f"\nTrainable params: {trainable_params:,d} || All params: {all_params:,d} || Trainable%: {100 * trainable_params / all_params:.2f}%")
+            print("Train following modules ...")
+            print("\n################################################")
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    print(name)
+            print("################################################\n")
     
     data_module = make_supervised_data_module(processor, data_args=data_args)
     trainer = Trainer(

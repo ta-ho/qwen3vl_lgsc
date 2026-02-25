@@ -4,13 +4,13 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-        {
-            "name": "Python Debugger: Current File",
-            "type": "debugpy",
-            "request": "launch",
-            "program": "${file}",
-            "console": "integratedTerminal"
-        },
+        // {
+        //     "name": "Python Debugger: Current File",
+        //     "type": "debugpy",
+        //     "request": "launch",
+        //     "program": "${file}",
+        //     "console": "integratedTerminal"
+        // },
         {
           "name": "Train Qwen3-VL",
           "type": "debugpy",
@@ -39,16 +39,14 @@
             "--master_addr", "127.0.0.1",
             "--master_port", "29556",
             "qwen-vl-finetune/qwenvl/train/train_qwen_roi.py", 
-            // "qwen-vl-finetune/qwenvl/train/train_qwen.py", 
-            // "--deepspeed", "./qwen-vl-finetune/scripts/zero3.json", 
             "--deepspeed", "./qwen-vl-finetune/scripts/zero2.json", 
             "--model_name_or_path", "/mnt/ssd1/sh/hf_home/Qwen3-VL-4B-Instruct", 
-            "--dataset_use", "refcoco%0.01", 
-            // "--dataset_use", "didemo",
+            "--dataset_use", "refcoco%0.1", 
             "--data_flatten", "False",
-            "--tune_mm_mlp", "True",
+            "--tune_mm_mlp", "False",
             "--tune_mm_vision", "False",
             "--tune_mm_llm", "False",
+            "--tune_roi", "True",
             "--bf16",
             "--output_dir", "./output/debug",
             "--num_train_epochs", "1.0",
@@ -59,8 +57,8 @@
             "--eval_strategy", "no", 
             "--save_strategy", "steps",
             "--save_steps", "500",
-            "--mm_projector_lr", "1e-5", 
             "--learning_rate", "1e-5",
+            "--roi_lr", "1e-3", 
             "--weight_decay", "0",
             "--warmup_ratio", "0.03",
             "--max_grad_norm", "1",

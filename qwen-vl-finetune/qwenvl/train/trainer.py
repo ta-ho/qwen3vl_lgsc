@@ -1,6 +1,7 @@
-from typing import Dict, List, Optional, Sequence, Tuple, Callable
+from typing import Dict, List, Optional, Union, Sequence, Tuple, Callable, Any
 
 import torch
+import torch.nn as nn
 from flash_attn.flash_attn_interface import flash_attn_varlen_func
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
 from transformers import Trainer
@@ -16,9 +17,9 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     Qwen2_5_VisionTransformerPretrainedModel,
     Qwen2_5_VLModel,
 )
-from transformers.models.qwen3_vl.modeling_qwen3_vl import (
+from qwenvl.model.modeling_qwen3_vl_roi import (
     Qwen3VLVisionModel,
-    Qwen3VLModel,
+    Qwen3VLROIModel,
     apply_rotary_pos_emb,
 )
 from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import (
@@ -29,6 +30,12 @@ from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
+local_rank = None
+
+
+def rank0_print(*args):
+    if local_rank == 0:
+        print(*args)
 
 def flash_attention_forward(
     module: torch.nn.Module,
@@ -215,6 +222,7 @@ def return_mask(
 def replace_qwen2_vl_attention_class():
     import transformers
     import transformers.modeling_flash_attention_utils
+    import qwenvl.model as qwen3_vl
 
 
     transformers.models.qwen2_vl.modeling_qwen2_vl.Qwen2VLAttention.forward = (
@@ -237,17 +245,17 @@ def replace_qwen2_vl_attention_class():
         return_mask
     )
     ## qwen3vl
-    transformers.models.qwen3_vl.modeling_qwen3_vl.Qwen3VLTextAttention.forward = (
+    qwen3_vl.modeling_qwen3_vl.Qwen3VLTextAttention.forward = (
         qwen3vl_forward
     )
-    transformers.models.qwen3_vl.modeling_qwen3_vl.create_causal_mask = (
+    qwen3_vl.modeling_qwen3_vl.create_causal_mask = (
         return_mask
     )
-    ## qwen3vl moe
-    transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe.Qwen3VLMoeTextAttention.forward = (
+    ## qwen3vl roi
+    qwen3_vl.modeling_qwen3_vl_roi.Qwen3VLTextAttention.forward = (
         qwen3vl_forward
     )
-    transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe.create_causal_mask = (
+    qwen3_vl.modeling_qwen3_vl_roi.create_causal_mask = (
         return_mask
     )
 
@@ -320,6 +328,13 @@ def create_optimizer(self):
     if self.optimizer is None:
         decay_parameters = self.get_decay_parameter_names(opt_model)
         decay_parameters = [name for name in decay_parameters if "bias" not in name]
+
+        ####################################################################
+        roi_align_parameters = [
+            name for name, _ in opt_model.named_parameters() if "roi" in name
+        ]
+        ####################################################################
+
         if self.args.mm_projector_lr is not None and self.args.mm_projector_lr != 0:
             projector_parameters = [
                 name for name, _ in opt_model.named_parameters() if "merger" in name
@@ -329,6 +344,7 @@ def create_optimizer(self):
                     name for name, _ in opt_model.named_parameters() if "visual" in name
                 ]
                 optimizer_grouped_parameters = [
+                    ##### llm parameters + weight decay
                     {
                         "params": [
                             p
@@ -337,11 +353,13 @@ def create_optimizer(self):
                                 n in decay_parameters
                                 and n not in projector_parameters
                                 and n not in vision_tower_parameters
+                                and n not in roi_align_parameters
                                 and p.requires_grad
                             )
                         ],
                         "weight_decay": self.args.weight_decay,
                     },
+                    ##### vision tower parameters + weight decay
                     {
                         "params": [
                             p
@@ -350,12 +368,14 @@ def create_optimizer(self):
                                 n in decay_parameters
                                 and n not in projector_parameters
                                 and n in vision_tower_parameters
+                                and n not in roi_align_parameters
                                 and p.requires_grad
                             )
                         ],
                         "weight_decay": self.args.weight_decay,
                         "lr": self.args.vision_tower_lr,
                     },
+                    ##### llm parameters (no weight decay)
                     {
                         "params": [
                             p
@@ -364,11 +384,13 @@ def create_optimizer(self):
                                 n not in decay_parameters
                                 and n not in projector_parameters
                                 and n not in vision_tower_parameters
+                                and n not in roi_align_parameters
                                 and p.requires_grad
                             )
                         ],
                         "weight_decay": 0.0,
                     },
+                    ##### vision tower parameters (no weight decay)
                     {
                         "params": [
                             p
@@ -377,12 +399,14 @@ def create_optimizer(self):
                                 n not in decay_parameters
                                 and n not in projector_parameters
                                 and n in vision_tower_parameters
+                                and n not in roi_align_parameters
                                 and p.requires_grad
                             )
                         ],
                         "weight_decay": 0.0,
                         "lr": self.args.vision_tower_lr,
                     },
+                    ##### mm projector parameters + weight decay
                     {
                         "params": [
                             p
@@ -396,6 +420,7 @@ def create_optimizer(self):
                         "weight_decay": self.args.weight_decay,
                         "lr": self.args.mm_projector_lr,
                     },
+                    ##### mm projector parameters (no weight decay)
                     {
                         "params": [
                             p
@@ -409,9 +434,38 @@ def create_optimizer(self):
                         "weight_decay": 0.0,
                         "lr": self.args.mm_projector_lr,
                     },
+                    ##### roi align parameters + weight decay
+                    {
+                        "params": [
+                            p
+                            for n, p in opt_model.named_parameters()
+                            if (
+                                n in decay_parameters
+                                and n in roi_align_parameters
+                                and p.requires_grad
+                            )
+                        ],
+                        "weight_decay": self.args.weight_decay,
+                        "lr": self.args.roi_lr if self.args.roi_lr is not None else self.args.learning_rate,
+                    }, 
+                    ##### roi align parameters (no weight decay)
+                    {
+                        "params": [
+                            p
+                            for n, p in opt_model.named_parameters()
+                            if (
+                                n not in decay_parameters
+                                and n in roi_align_parameters
+                                and p.requires_grad
+                            )
+                        ],
+                        "weight_decay": 0.0,
+                        "lr": self.args.roi_lr if self.args.roi_lr is not None else self.args.learning_rate,
+                    }, 
                 ]
             else:
                 optimizer_grouped_parameters = [
+                    ##### vision tower parameters + llm parameters + weight decay
                     {
                         "params": [
                             p
@@ -419,11 +473,13 @@ def create_optimizer(self):
                             if (
                                 n in decay_parameters
                                 and n not in projector_parameters
+                                and n not in roi_align_parameters
                                 and p.requires_grad
                             )
                         ],
                         "weight_decay": self.args.weight_decay,
                     },
+                    ##### vision tower parameters + llm parameters (no weight decay)
                     {
                         "params": [
                             p
@@ -431,11 +487,13 @@ def create_optimizer(self):
                             if (
                                 n not in decay_parameters
                                 and n not in projector_parameters
+                                and n not in roi_align_parameters
                                 and p.requires_grad
                             )
                         ],
                         "weight_decay": 0.0,
                     },
+                    ##### mm projector parameters + weight decay
                     {
                         "params": [
                             p
@@ -449,6 +507,7 @@ def create_optimizer(self):
                         "weight_decay": self.args.weight_decay,
                         "lr": self.args.mm_projector_lr,
                     },
+                    ##### mm projector parameters (no weight decay)
                     {
                         "params": [
                             p
@@ -461,25 +520,91 @@ def create_optimizer(self):
                         ],
                         "weight_decay": 0.0,
                         "lr": self.args.mm_projector_lr,
+                    },
+                    ##### roi align parameters + weight decay
+                    {
+                        "params": [
+                            p
+                            for n, p in opt_model.named_parameters()
+                            if (
+                                n in decay_parameters
+                                and n in roi_align_parameters
+                                and p.requires_grad
+                            )
+                        ],
+                        "weight_decay": self.args.weight_decay,
+                        "lr": self.args.roi_lr if self.args.roi_lr is not None else self.args.learning_rate,
+                    },
+                    ##### roi align parameters (no weight decay)
+                    {
+                        "params": [
+                            p
+                            for n, p in opt_model.named_parameters()
+                            if (
+                                n not in decay_parameters
+                                and n in roi_align_parameters
+                                and p.requires_grad
+                            )
+                        ],
+                        "weight_decay": 0.0,
+                        "lr": self.args.roi_lr if self.args.roi_lr is not None else self.args.learning_rate,
                     },
                 ]
         else:
-            optimizer_grouped_parameters = [
+            optimizer_grouped_parameters = [                
+                ##### others + weight decay
                 {
                     "params": [
                         p
                         for n, p in opt_model.named_parameters()
-                        if (n in decay_parameters and p.requires_grad)
+                        if (
+                            n in decay_parameters 
+                            and n not in roi_align_parameters
+                            and p.requires_grad
+                        )
                     ],
                     "weight_decay": self.args.weight_decay,
                 },
+                ##### others (no weight decay)
                 {
                     "params": [
                         p
                         for n, p in opt_model.named_parameters()
-                        if (n not in decay_parameters and p.requires_grad)
+                        if (
+                            n not in decay_parameters 
+                            and n not in roi_align_parameters
+                            and p.requires_grad
+                        )
                     ],
                     "weight_decay": 0.0,
+                },
+                ##### roi align parameters + weight decay
+                {
+                    "params": [
+                        p
+                        for n, p in opt_model.named_parameters()
+                        if (
+                            n in decay_parameters 
+                            and n in roi_align_parameters
+                            and p.requires_grad
+                        )
+                    ],
+                    "weight_decay": self.args.weight_decay,
+                    "lr": self.args.roi_lr if self.args.roi_lr is not None else self.args.learning_rate,
+                },
+                ##### roi align parameters (no weight decay)
+                {
+                    "params": [
+                        p
+                        for n, p in opt_model.named_parameters()
+                        if (
+                            n not in decay_parameters 
+                            and n in roi_align_parameters
+                            and p.requires_grad
+                        )
+                    ],
+                    "weight_decay": 0.0,
+                    "lr": self.args.roi_lr if self.args.roi_lr is not None else self.args.learning_rate,
                 },
             ]
 
@@ -490,6 +615,88 @@ def create_optimizer(self):
 
     return self.optimizer
 
+
+
+def compute_loss(
+    self,
+    model: nn.Module,
+    inputs: dict,
+    return_outputs: bool = False,
+    num_items_in_batch: Optional[torch.Tensor] = None,
+):
+    if (self.label_smoother is not None or self.compute_loss_func is not None) and "labels" in inputs:
+        labels = inputs.pop("labels")
+    else:
+        labels = None
+        
+    if self.model_accepts_loss_kwargs:
+        loss_kwargs = {}
+        if num_items_in_batch is not None:
+            loss_kwargs["num_items_in_batch"] = num_items_in_batch
+        inputs = {**inputs, **loss_kwargs}
+        
+    outputs = model(**inputs)
+
+    #########################################################################
+    ##### check model_output (Lightweight Forward Logger)
+    if rank0_print and hasattr(self.state, "global_step") and self.state.global_step % 100 == 0:
+        print("\n" + "#"*60)
+        print(f"[Step {self.state.global_step}]")
+        try:
+            _tokenizer = getattr(self, "tokenizer", getattr(self, "processing_class", None))
+            _tokenizer = self.processing_class
+            # 1. input
+            _input = inputs['input_ids'][0][inputs['attention_mask'][0]]
+            input_text = _tokenizer.decode(_input).split("<|vision_end|>")[-1]
+            print(f"INPUT:\n{input_text.strip()}\n")
+
+            # 2. label
+            _labels_t = labels if labels is not None else inputs.get("labels")
+            _label = _labels_t[0][inputs['attention_mask'][0] == 1]
+            label_text = _tokenizer.decode(_label[_label != -100])
+            print(f"LABEL:\n{label_text}\n")
+
+            # 3. output prediction
+            _pred = outputs.logits[0].argmax(dim=-1)
+            _shifted_labels = _labels_t[0][1:]
+            valid_mask = (_shifted_labels != -100) & (inputs['attention_mask'][0][1:] == 1)
+            pred_text = _tokenizer.decode(_pred[:-1][valid_mask])
+            print(f"OUTPUT (Logits):\n{pred_text}\n")
+
+        except Exception as e:
+            print(f"Log Output Error: {e}")
+        print("#"*60 + "\n")
+    #########################################################################
+
+    if self.args.past_index >= 0:
+        self._past = outputs[self.args.past_index]
+
+    if labels is not None:
+        unwrapped_model = self.accelerator.unwrap_model(model)
+        from transformers.trainer import _is_peft_model, MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+        if _is_peft_model(unwrapped_model):
+            model_name = unwrapped_model.base_model.model._get_name()
+        else:
+            model_name = unwrapped_model._get_name()
+            
+        if self.compute_loss_func is not None:
+            loss = self.compute_loss_func(outputs, labels, num_items_in_batch=num_items_in_batch)
+        elif model_name in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.values():
+            loss = self.label_smoother(outputs, labels, shift_labels=True)
+        else:
+            loss = self.label_smoother(outputs, labels)
+    else:
+        if isinstance(outputs, dict) and "loss" not in outputs:
+            raise ValueError("The model did not return a loss")
+        loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+
+    if (self.args.average_tokens_across_devices and num_items_in_batch is not None):
+        loss *= self.accelerator.num_processes if self.args.n_gpu <= 1 else self.args.n_gpu
+
+    return (loss, outputs) if return_outputs else loss
+
+
+Trainer.compute_loss = compute_loss
 
 # Apply monkey patches
 Trainer.create_optimizer = create_optimizer
@@ -506,6 +713,12 @@ Qwen2_5_VLModel.print_trainable_parameters = print_trainable_parameters
 Qwen3VLVisionModel.print_trainable_parameters = (
     print_trainable_parameters_visual
 )
-Qwen3VLModel.print_trainable_parameters = print_trainable_parameters
-Qwen3VLMoeVisionModel.print_trainable_parameters = print_trainable_parameters_visual
-Qwen3VLMoeModel.print_trainable_parameters = print_trainable_parameters
+Qwen3VLROIModel.print_trainable_parameters = print_trainable_parameters
+#######################################################
+Qwen3VLVisionModel.print_trainable_parameters = (
+    print_trainable_parameters_visual
+)
+Qwen3VLROIModel.print_trainable_parameters = print_trainable_parameters
+#######################################################
+# Qwen3VLMoeVisionModel.print_trainable_parameters = print_trainable_parameters_visual
+# Qwen3VLMoeModel.print_trainable_parameters = print_trainable_parameters
